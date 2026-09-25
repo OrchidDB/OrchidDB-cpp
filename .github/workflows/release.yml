@@ -33,19 +33,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: {workspaces: .native-build/orchiddb-native}
       - run: ./scripts/build-native.sh
-      - name: Fetch test-only DuckDB 1.5.2
-        run: |
-          mkdir duckdb
-          curl -fL "https://github.com/duckdb/duckdb/releases/download/v1.5.2/libduckdb-${{ matrix.duckdb }}.zip" -o duckdb/duckdb.zip
-          unzip -q duckdb/duckdb.zip -d duckdb
-      - run: >-
-          cmake -S . -B build -DORCHIDDB_BUILD_TESTS=ON
-          -DDUCKDB_INCLUDE_DIR="$PWD/duckdb"
-          -DDUCKDB_LIBRARY="$PWD/duckdb/${{ matrix.duckdb_library }}"
-          -DORCHIDDB_NATIVE_LIBRARY="$PWD/_native/${{ matrix.library }}"
-      - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+      - run: ./scripts/test.sh
         env: {ORCHIDDB_NATIVE_LIBRARY: '${{ github.workspace }}/_native/${{ matrix.library }}'}
+      - run: cmake -S . -B build -DORCHIDDB_NATIVE_LIBRARY="$PWD/_native/${{ matrix.library }}"
       - run: cpack --config build/CPackConfig.cmake
       - name: Check tag version
         if: startsWith(github.ref, 'refs/tags/v')
