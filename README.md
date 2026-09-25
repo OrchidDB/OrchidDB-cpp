@@ -32,6 +32,8 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix "$HOME/.local"
 ```
 
+`ORCHIDDB_NATIVE_LIBRARY=/path/to/library ./scripts/test.sh` also fetches the test-only DuckDB driver and runs this suite on Linux/macOS. Set `DUCKDB_ROOT` to reuse a local driver.
+
 Normal builds do not require DuckDB or Arrow C++. The standard Arrow C ABI header is vendored with its Apache license; nlohmann_json 3.12 is required (pinned fetch fallback is provided).
 
 Installed usage: `find_package(OrchidDB CONFIG REQUIRED)` then `target_link_libraries(app PRIVATE OrchidDB::orchiddb)`. Point `ORCHIDDB_NATIVE_LIBRARY` at the compiler shared library. For compiler request fields see [compiler documentation](https://docs.orchiddb.com/sql-compiler.html). SQL parameters are specialized literals; recompile after relevant values/schema/mappings/functions change.

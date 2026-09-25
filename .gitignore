@@ -3,3 +3,4 @@ _dist/
 *.tar.gz
 .native-build/
 _native/
+.test-deps/
