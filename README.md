@@ -19,6 +19,24 @@ The [complete DuckDB integration example](tests/integration.cpp) and [borrowed c
 
 Implement `ExecutionEngine` (`id`, `dialect`, `execute`) to support another Arrow-capable backend. `ArrowResult` takes ownership of a supplied `ArrowArrayStream` and clears the source. Stream, schema and batch have independent release callbacks and move-only RAII ownership. Batches remain valid after advancing/closing the stream. Connections must outlive result production. Neither OrchidDB nor its adapters commit or close your connection. Stream callbacks are serialized by the caller; no automatic parallel execution/federation. Postgres SQL rendering is supported, but this repository only integration-tests DuckDB.
 
+## Run against the published binary
+
+Download and extract the [0.1.0 macOS ARM64 archive](https://github.com/OrchidDB/OrchidDB-cpp/releases/download/v0.1.0/orchiddb-cpp-0.1.0-Darwin-arm64.tar.gz). It contains the compiler, headers, JSON dependency and CMake package. No Rust build is required.
+
+With your DuckDB 1.5.2 headers/library available, run the example:
+
+```sh
+cmake -S examples -B examples/build \
+  -DCMAKE_PREFIX_PATH=/absolute/path/orchiddb-cpp-0.1.0-Darwin-arm64 \
+  -DDUCKDB_INCLUDE_DIR=/path/to/duckdb/include \
+  -DDUCKDB_LIBRARY=/path/to/libduckdb.dylib
+cmake --build examples/build
+export ORCHIDDB_NATIVE_LIBRARY=/absolute/path/orchiddb-cpp-0.1.0-Darwin-arm64/lib/liborchiddb_compiler.dylib
+ctest --test-dir examples/build --output-on-failure
+```
+
+This uses the installed CMake package, not the client checkout's headers. It verifies Arrow values, nulls, 64-bit IDs, rollback, resource ownership and connection reuse.
+
 ## Build and test
 
 Get the compiler library from [OrchidDB-native](https://github.com/OrchidDB/OrchidDB-native), then:
@@ -40,4 +58,4 @@ Installed usage: `find_package(OrchidDB CONFIG REQUIRED)` then `target_link_libr
 
 ## Releases
 
-Tag `vX.Y.Z` matching CMake project version. GitHub Actions builds the exact native source in `NATIVE_REVISION`, runs integration tests, packages installable CMake headers/configuration, JSON dependency and the native library, and uploads platform `.tar.gz` assets to this repository's GitHub release. No package-manager credentials are needed for GitHub releases. No release has been published yet. License: [existing OrchidDB GPL-3.0-only license](LICENSE.md).
+Tag `vX.Y.Z` matching CMake project version. GitHub Actions builds the exact native source in `NATIVE_REVISION`, runs integration tests, packages installable CMake headers/configuration, JSON dependency and the native library, and uploads platform `.tar.gz` assets to this repository's GitHub release. No package-manager credentials are needed for GitHub releases. Version 0.1.0 is published for macOS ARM64. License: [existing OrchidDB GPL-3.0-only license](LICENSE.md).
