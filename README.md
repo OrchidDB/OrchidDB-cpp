@@ -1,6 +1,6 @@
 # OrchidDB C++ client
 
-C++17 compiler binding plus move-only Arrow C stream results. Your application owns the database, connection, schema mappings, UDFs, extensions, transactions and caches. The compiler never receives result data and has no DuckDB dependency.
+C++17 compiler binding plus move-only Arrow C stream results. Your application owns the database, connection, schema mappings, UDFs, extensions, transactions and caches. Query results stay in the application. Explicit statistics generation sends bounded collection batches to the shared core, which has no DuckDB dependency.
 
 ```cpp
 #include <orchiddb/orchiddb.hpp>
@@ -59,3 +59,35 @@ Installed usage: `find_package(OrchidDB CONFIG REQUIRED)` then `target_link_libr
 ## Releases
 
 Tag `vX.Y.Z` matching CMake project version. GitHub Actions builds the exact native source in `NATIVE_REVISION`, runs integration tests, packages installable CMake headers/configuration, JSON dependency and the native library, and uploads platform `.tar.gz` assets to this repository's GitHub release. No package-manager credentials are needed for GitHub releases. Version 0.1.0 is published for macOS ARM64. License: [existing OrchidDB GPL-3.0-only license](LICENSE.md).
+
+## One-time statistics
+
+```cpp
+orchiddb::Statistics statistics(compiler);
+orchiddb::generate_statistics(statistics, request, engine);
+auto plan = statistics.compile(request);
+auto results = orchiddb::query(statistics, request, engine);
+statistics.save("statistics.json"); // Restore with statistics.load(path).
+// statistics.report() explains collected and skipped work.
+statistics.clear();
+```
+
+The shared Rust coordinator chooses collection SQL and computes every summary.
+`ExecutionEngine::collect_statistics(work)` reuses the caller's session, enforcing
+`timeout_ms`, `max_rows`, and `max_bytes`. It returns `{"rows":[...]}` or
+`{"ipc":"base64 Arrow IPC stream"}`. Its default implementation reports bounded
+execution as unsupported. The included DuckDB adapter implements collection,
+transport caps and interruption deadlines. Alternatively, call
+`statistics.generate(request, callback)` for application-owned adapters.
+
+`CompiledQuery::diagnostics` retains the complete compiler response, including
+statistics usage, plan estimates, and representation/layout decisions. Native
+catalog handles avoid repeated serialization; snapshots are portable JSON.
+Generation is explicit, may use multiple calls, and replaces a catalog only on
+success. Compilation never reads data or refreshes statistics. `Statistics`
+releases its catalog on destruction. `Compiler::statistics_command` exposes the
+shared protocol for applications that manage collection and cancellation.
+
+Collectors must set `truncated: true` when transport limits stop a response before
+EOF; the coordinator retains those observations as a partial sample. It must not
+infer a complete source row count from a shortened response.

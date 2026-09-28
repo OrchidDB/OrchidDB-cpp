@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <functional>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -15,9 +16,9 @@
 
 namespace orchiddb {
 using Json = nlohmann::json;
-struct CompiledQuery { std::string dialect, sql; std::vector<std::string> fields; };
+struct CompiledQuery { std::string dialect, sql; std::vector<std::string> fields; Json diagnostics = Json::object(); };
 
-/** Database-free compiler. Serialized query/schema metadata is the only FFI data. */
+/** Shared compiler and explicit statistics coordinator. Connections remain application-owned. */
 class Compiler {
   struct Library {
 #ifdef _WIN32
@@ -34,6 +35,7 @@ class Compiler {
   };
   std::shared_ptr<Library> library_;
   char* (*compile_)(const char*);
+  char* (*statistics_)(const char*);
   void (*free_)(char*);
   const char* (*revision_)();
 public:
@@ -51,20 +53,89 @@ public:
     auto abi = reinterpret_cast<uint32_t(*)()>(library_->symbol("orchiddb_abi_version"));
     if (abi() != 1) throw std::runtime_error("Unsupported OrchidDB ABI");
     compile_ = reinterpret_cast<char*(*)(const char*)>(library_->symbol("orchiddb_compile_json"));
+    statistics_ = reinterpret_cast<char*(*)(const char*)>(library_->symbol("orchiddb_statistics_json"));
     free_ = reinterpret_cast<void(*)(char*)>(library_->symbol("orchiddb_string_free"));
     revision_ = reinterpret_cast<const char*(*)()>(library_->symbol("orchiddb_core_revision"));
   }
   std::string core_revision() const { return revision_(); }
-  CompiledQuery compile(const Json& request) const {
-    const auto encoded = request.dump();
-    std::unique_ptr<char, void(*)(char*)> response(compile_(encoded.c_str()), free_);
-    if (!response) throw std::runtime_error("Null compiler response");
+  Json statistics_command(const Json& command) const {
+    const auto encoded = command.dump();
+    std::unique_ptr<char, void(*)(char*)> response(statistics_(encoded.c_str()), free_);
+    if (!response) throw std::runtime_error("Null statistics response");
     auto envelope = Json::parse(response.get());
-    if (!envelope.value("ok", false)) throw std::runtime_error(envelope.value("error", "Compiler error"));
-    const auto& plan = envelope.at("result");
-    if (plan.at("version") != 1 || plan.at("dialect") != request.at("dialect")) throw std::runtime_error("Invalid compiler response");
-    return {plan.at("dialect").get<std::string>(), plan.at("sql").get<std::string>(), plan.at("fields").get<std::vector<std::string>>()};
+    if (!envelope.value("ok", false)) throw std::runtime_error(envelope.value("error", "Statistics error"));
+    return envelope.at("result");
   }
+  CompiledQuery compile(const Json& request, const Json& catalog_id = nullptr) const {
+    Json plan;
+    if (!catalog_id.is_null()) {
+      plan = statistics_command({{"op", "compile"}, {"catalog_id", catalog_id}, {"request", request}});
+    } else {
+      const auto encoded = request.dump();
+      std::unique_ptr<char, void(*)(char*)> response(compile_(encoded.c_str()), free_);
+      if (!response) throw std::runtime_error("Null compiler response");
+      auto envelope = Json::parse(response.get());
+      if (!envelope.value("ok", false)) throw std::runtime_error(envelope.value("error", "Compiler error"));
+      plan = envelope.at("result");
+    }
+    if (plan.at("version") != 1 || plan.at("dialect") != request.at("dialect")) throw std::runtime_error("Invalid compiler response");
+    return {plan.at("dialect").get<std::string>(), plan.at("sql").get<std::string>(), plan.at("fields").get<std::vector<std::string>>(), plan};
+  }
+};
+
+/** Shared coordinator catalog; collection callback borrows an application-owned session.
+ * Callback must honor timeout_ms/max_rows/max_bytes, returning rows or base64 IPC.
+ * Throw if the session cannot execute with those bounds. No client estimators.
+ */
+class Statistics {
+  Compiler compiler_;
+  Json catalog_id_, snapshot_, report_;
+public:
+  explicit Statistics(Compiler compiler) : compiler_(std::move(compiler)) {}
+  Statistics(const Statistics&) = delete;
+  Statistics& operator=(const Statistics&) = delete;
+  ~Statistics() { try { clear(); } catch (...) {} }
+  const Json& snapshot() const { return snapshot_; }
+  const Json& report() const { return report_; }
+  void clear() {
+    if (!catalog_id_.is_null()) compiler_.statistics_command({{"op", "release"}, {"catalog_id", catalog_id_}});
+    catalog_id_ = snapshot_ = report_ = nullptr;
+  }
+  void install(const Json& snapshot) {
+    auto result = compiler_.statistics_command({{"op", "install"}, {"snapshot", snapshot}});
+    clear(); catalog_id_ = result.at("catalog_id"); snapshot_ = snapshot;
+  }
+  void save(const std::string& path) const {
+    if (snapshot_.is_null()) throw std::runtime_error("No statistics installed");
+    std::ofstream output(path);
+    output << snapshot_.dump();
+    if (!output) throw std::runtime_error("Cannot save statistics snapshot");
+  }
+  void load(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("Cannot load statistics snapshot");
+    install(Json::parse(input));
+  }
+  void generate(const Json& request, const std::function<Json(const Json&)>& collect) {
+    auto state = compiler_.statistics_command({{"op", "begin"}, {"request", request}});
+    const auto id = state.at("id");
+    try {
+      while (!state.at("request").is_null()) {
+        const auto work = state.at("request");
+        Json response;
+        try { response = collect(work); }
+        catch (const std::exception& e) { response = {{"error", e.what()}}; }
+        response["op"] = "submit"; response["id"] = id; response["request_id"] = work.at("id");
+        state = compiler_.statistics_command(response);
+      }
+      auto result = compiler_.statistics_command({{"op", "finish"}, {"id", id}});
+      clear(); catalog_id_ = result.at("catalog_id"); snapshot_ = result.at("snapshot"); report_ = result.at("report");
+    } catch (...) {
+      try { compiler_.statistics_command({{"op", "cancel"}, {"id", id}}); } catch (...) {}
+      throw;
+    }
+  }
+  CompiledQuery compile(const Json& request) const { return compiler_.compile(request, catalog_id_); }
 };
 
 /** C Data objects own their release callback independently of the stream. */
@@ -114,9 +185,19 @@ public:
   virtual std::string id() const = 0;
   virtual std::string dialect() const = 0;
   virtual ArrowResult execute(const CompiledQuery&) = 0;
+  // Override using the existing session when it can enforce all supplied bounds.
+  virtual Json collect_statistics(const Json&) { throw std::runtime_error("Bounded statistics execution unsupported"); }
 };
 inline ArrowResult query(const Compiler& compiler, const Json& request, ExecutionEngine& engine) {
   if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
   return engine.execute(compiler.compile(request));
+}
+inline void generate_statistics(Statistics& statistics, const Json& request, ExecutionEngine& engine) {
+  if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
+  statistics.generate(request, [&](const Json& work) { return engine.collect_statistics(work); });
+}
+inline ArrowResult query(const Statistics& statistics, const Json& request, ExecutionEngine& engine) {
+  if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
+  return engine.execute(statistics.compile(request));
 }
 } // namespace orchiddb
