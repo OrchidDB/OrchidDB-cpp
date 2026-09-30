@@ -58,6 +58,22 @@ int main() {
     REQUIRE(statistics.snapshot().at("sources").at("people").at("method") != "complete bounded read");
     REQUIRE(statistics.report().at("complete") == false);
     statistics.clear();
+    sql(connection,"CREATE TABLE documents(id BIGINT, project_id BIGINT, title VARCHAR); INSERT INTO documents VALUES (1,10,'direct'),(2,20,'project'),(3,30,'denied'); CREATE TABLE effective_grants(resource_type VARCHAR, resource_rel VARCHAR, resource_id VARCHAR, subject_type VARCHAR, subject_rel VARCHAR, subject_id VARCHAR); INSERT INTO effective_grants VALUES ('document','view','1','user','','alice'),('project','view','20','user','','alice'),('project','view','30','user','','bob')");
+    auto direct=orchiddb::permission_relation("effective_grants","document","view");
+    auto project=orchiddb::permission_relation("effective_grants","project","view");
+    auto protected_request=orchiddb::Json::parse(R"({"version":1,"dialect":"duckdb","language":"cypher","query":"MATCH (d:Document) RETURN d.id AS id ORDER BY id","tables":[{"name":"documents","columns":[{"name":"id","data_type":"int64"},{"name":"project_id","data_type":"int64"},{"name":"title","data_type":"string"}]},{"name":"effective_grants","columns":[{"name":"resource_type","data_type":"string"},{"name":"resource_rel","data_type":"string"},{"name":"resource_id","data_type":"string"},{"name":"subject_type","data_type":"string"},{"name":"subject_rel","data_type":"string"},{"name":"subject_id","data_type":"string"}]}],"nodes":[{"label":"Document","table":"documents","id":"id","properties":{"id":"id","project_id":"project_id"}}]})");
+    protected_request["authorization"]=orchiddb::authorization("user","alice");
+    protected_request["nodes"][0]["permission_scopes"]={
+      orchiddb::permission_scope("id",direct),
+      orchiddb::permission_scope("project_id",project)
+    };
+    auto protected_result=orchiddb::query(compiler,protected_request,engine);
+    auto protected_batch=protected_result.next(); REQUIRE(protected_batch.get()->length==2);
+    const auto* protected_ids=static_cast<const int64_t*>(protected_batch.get()->children[0]->buffers[1]);
+    REQUIRE(protected_ids[0]==1 && protected_ids[1]==2);
+    protected_result.close();
+    auto missing_principal=protected_request; missing_principal.erase("authorization");
+    bool missing_failed=false;try {compiler.compile(missing_principal);}catch(const std::exception&){missing_failed=true;} REQUIRE(missing_failed);
     request["query"]="invalid graph query";
     bool failed=false;try {compiler.compile(request);}catch(const std::exception&){failed=true;} REQUIRE(failed);
     request["dialect"]="postgres";

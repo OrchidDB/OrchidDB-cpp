@@ -91,3 +91,19 @@ shared protocol for applications that manage collection and cancellation.
 Collectors must set `truncated: true` when transport limits stop a response before
 EOF; the coordinator retains those observations as a partial sample. It must not
 infer a complete source row count from a shortened response.
+
+## Permission pushdown
+
+The request uses provider-neutral permission relation data. Add the permission source and its columns to `tables`, set top-level `authorization`, and attach `permission_scopes` to a node. The C++ helpers construct these JSON fields:
+
+```cpp
+auto direct = orchiddb::permission_relation("effective_grants", "document", "view");
+auto project = orchiddb::permission_relation("effective_grants", "project", "view");
+request["authorization"] = orchiddb::authorization("user", "alice");
+request["nodes"][0]["permission_scopes"] = {
+  orchiddb::permission_scope("id", direct),
+  orchiddb::permission_scope("project_id", project)
+};
+```
+
+The relation must already contain effective grants for the principal. Multiple scopes are OR membership filters, and duplicate or overlapping grants do not duplicate graph rows.

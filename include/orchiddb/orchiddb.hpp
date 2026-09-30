@@ -18,6 +18,27 @@ namespace orchiddb {
 using Json = nlohmann::json;
 struct CompiledQuery { std::string dialect, sql; std::vector<std::string> fields; Json diagnostics = Json::object(); };
 
+/** Build provider-neutral permission input records for a compiler request. */
+inline Json permission_relation(std::string table, std::string resource_type,
+    std::string permission, Json columns = Json::object()) {
+  Json relation = {
+    {"table", std::move(table)}, {"resource_type", std::move(resource_type)},
+    {"permission", std::move(permission)}, {"resource_type_column", "resource_type"},
+    {"permission_column", "resource_rel"}, {"resource_id_column", "resource_id"},
+    {"subject_type_column", "subject_type"}, {"subject_relation_column", "subject_rel"},
+    {"subject_id_column", "subject_id"}
+  };
+  if (!columns.is_object()) throw std::invalid_argument("Permission relation columns must be an object");
+  for (auto it = columns.begin(); it != columns.end(); ++it) relation[it.key()] = it.value();
+  return relation;
+}
+inline Json permission_scope(std::string resource_column, Json relation) {
+  return {{"resource_column", std::move(resource_column)}, {"relation", std::move(relation)}};
+}
+inline Json authorization(std::string subject_type, std::string subject_id) {
+  return {{"subject_type", std::move(subject_type)}, {"subject_id", std::move(subject_id)}};
+}
+
 /** Shared compiler and explicit statistics coordinator. Connections remain application-owned. */
 class Compiler {
   struct Library {
