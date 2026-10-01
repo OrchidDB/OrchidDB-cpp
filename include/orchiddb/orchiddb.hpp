@@ -5,6 +5,8 @@
 #include <functional>
 #include <fstream>
 #include <memory>
+#include <map>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -56,6 +58,7 @@ class Compiler {
   };
   std::shared_ptr<Library> library_;
   char* (*compile_)(const char*);
+  char* (*bind_arrow_)(const char*, ArrowArrayStream*);
   char* (*statistics_)(const char*);
   void (*free_)(char*);
   const char* (*revision_)();
@@ -74,9 +77,19 @@ public:
     auto abi = reinterpret_cast<uint32_t(*)()>(library_->symbol("orchiddb_abi_version"));
     if (abi() != 1) throw std::runtime_error("Unsupported OrchidDB ABI");
     compile_ = reinterpret_cast<char*(*)(const char*)>(library_->symbol("orchiddb_compile_json"));
+    bind_arrow_ = reinterpret_cast<char*(*)(const char*, ArrowArrayStream*)>(library_->symbol("orchiddb_bind_arrow_json"));
     statistics_ = reinterpret_cast<char*(*)(const char*)>(library_->symbol("orchiddb_statistics_json"));
     free_ = reinterpret_cast<void(*)(char*)>(library_->symbol("orchiddb_string_free"));
     revision_ = reinterpret_cast<const char*(*)()>(library_->symbol("orchiddb_core_revision"));
+  }
+  CompiledQuery bind_arrow(const CompiledQuery& plan, const std::string& relation, ArrowArrayStream* stream) const {
+    const auto encoded = Json{{"plan",plan.diagnostics},{"relation",relation}}.dump();
+    std::unique_ptr<char,void(*)(char*)> response(bind_arrow_(encoded.c_str(),stream),free_);
+    if (!response) throw std::runtime_error("Null Arrow binding response");
+    auto envelope=Json::parse(response.get());
+    if (!envelope.value("ok",false)) throw std::runtime_error(envelope.value("error","Arrow binding failed"));
+    auto bound=envelope.at("result");
+    return {bound.at("dialect"),bound.at("sql"),bound.at("fields").get<std::vector<std::string>>(),bound};
   }
   std::string core_revision() const { return revision_(); }
   Json statistics_command(const Json& command) const {
@@ -196,6 +209,7 @@ public:
   Schema schema() { require_open(); Schema out; check(stream_.get()->get_schema(stream_.get(), out.get())); return out; }
   /** A batch with no release callback marks EOF. Prior batches retain independent ownership. */
   RecordBatch next() { require_open(); RecordBatch out; check(stream_.get()->get_next(stream_.get(), out.get())); return out; }
+  ArrowArrayStream* stream_for_binding() { require_open(); return stream_.get(); }
   void close() noexcept { stream_.close(); }
 };
 
@@ -211,7 +225,9 @@ public:
 };
 inline ArrowResult query(const Compiler& compiler, const Json& request, ExecutionEngine& engine) {
   if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
-  return engine.execute(compiler.compile(request));
+  auto plan = compiler.compile(request);
+  if (!plan.diagnostics.value("transfers", Json::array()).empty()) throw std::invalid_argument("Use query_federated for a multi-engine plan");
+  return engine.execute(plan);
 }
 inline void generate_statistics(Statistics& statistics, const Json& request, ExecutionEngine& engine) {
   if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
@@ -219,6 +235,37 @@ inline void generate_statistics(Statistics& statistics, const Json& request, Exe
 }
 inline ArrowResult query(const Statistics& statistics, const Json& request, ExecutionEngine& engine) {
   if (request.at("dialect") != engine.dialect()) throw std::invalid_argument("Compiler and engine SQL dialects differ");
-  return engine.execute(statistics.compile(request));
+  auto plan = statistics.compile(request);
+  if (!plan.diagnostics.value("transfers", Json::array()).empty()) throw std::invalid_argument("Use query_federated for a multi-engine plan");
+  return engine.execute(plan);
 }
+
+/** Consume the result inside the callback. Sessions remain application-owned. */
+inline void query_federated(const Compiler& compiler, const Json& request,
+    const std::map<std::string, ExecutionEngine*>& engines,
+    const std::function<void(ArrowResult&)>& consume) {
+  auto plan = compiler.compile(request);
+  const auto target_id = plan.diagnostics.at("execution_engine").get<std::string>();
+  const auto transfers = plan.diagnostics.value("transfers", Json::array());
+  auto check = [&](const std::string& id, const std::string& dialect) {
+    auto found = engines.find(id);
+    if (found == engines.end() || !found->second || found->second->dialect() != dialect)
+      throw std::invalid_argument("Missing engine or dialect mismatch: " + id);
+  };
+  check(target_id, plan.dialect);
+  for (const auto& t : transfers) check(t.at("source_engine"), t.at("source_dialect"));
+  auto& target = *engines.at(target_id);
+  for (const auto& t : transfers) {
+    std::vector<std::string> fields;
+    for (const auto& c : t.at("columns")) fields.push_back(c.at("name"));
+    CompiledQuery source{t.at("source_dialect"),t.at("sql"),fields};
+    source.diagnostics["field_types"] = Json::array();
+    for (const auto& c : t.at("columns")) source.diagnostics["field_types"].push_back(c.at("data_type"));
+    auto result=engines.at(t.at("source_engine"))->execute(source);
+    plan=compiler.bind_arrow(plan,t.at("target_relation"),result.stream_for_binding());
+  }
+  auto result=target.execute(plan);
+  consume(result);
+}
+
 } // namespace orchiddb

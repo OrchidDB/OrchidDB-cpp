@@ -8,6 +8,16 @@ void sql(duckdb_connection c,const char* q) {
   duckdb_destroy_result(&result);
   if(status!=DuckDBSuccess) throw std::runtime_error(error);
 }
+class ExchangeEngine : public orchiddb::ExecutionEngine {
+  duckdb_connection connection_;
+  DuckDBEngine delegate_;
+public:
+  explicit ExchangeEngine(duckdb_connection c) : connection_(c), delegate_(c) {}
+  std::string id() const override { return "exchange"; }
+  std::string dialect() const override { return "duckdb"; }
+  orchiddb::ArrowResult execute(const orchiddb::CompiledQuery& q) override { return delegate_.execute(q); }
+
+};
 int main() {
   duckdb_database db{}; duckdb_connection connection{};
   REQUIRE(duckdb_open(nullptr,&db)==DuckDBSuccess);
@@ -33,6 +43,22 @@ int main() {
     auto count_batch=count.next();
     REQUIRE(static_cast<const int64_t*>(count_batch.get()->children[0]->buffers[1])[0]==2);
     count.close();
+    // A second real connection receives an aggregate island result.
+    duckdb_connection target_connection{};
+    REQUIRE(duckdb_connect(db, &target_connection) == DuckDBSuccess);
+    {
+      ExchangeEngine target(target_connection);
+      auto routed = request;
+      routed["engines"] = {{"source", {{"dialect", "duckdb"}}}, {"target", {{"dialect", "duckdb"}}}};
+      routed["execution_engine"] = "target";
+      routed["tables"][0]["engine"] = "source";
+      orchiddb::query_federated(compiler, routed, {{"source", &engine}, {"target", &target}}, [](orchiddb::ArrowResult& r) {
+        auto b = r.next();
+        REQUIRE(b.get()->length == 1);
+        REQUIRE(static_cast<const int64_t*>(b.get()->children[0]->buffers[1])[0] == 2);
+      });
+    }
+    duckdb_disconnect(&target_connection);
     orchiddb::Statistics statistics(compiler);
     orchiddb::generate_statistics(statistics, request, engine);
     REQUIRE(!statistics.snapshot().is_null());

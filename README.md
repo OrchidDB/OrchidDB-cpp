@@ -17,7 +17,7 @@ while (auto batch = result.next()) {
 
 The [complete DuckDB integration example](tests/integration.cpp) and [borrowed connection adapter](examples/duckdb_engine.hpp) show real data, nulls, large integers, rollback and result ownership. DuckDB is a test/application dependency. This example uses DuckDB's Arrow query API, which materializes the query before exposing columnar batches; Arrow does not imply streaming query execution or zero-copy for all engines.
 
-Implement `ExecutionEngine` (`id`, `dialect`, `execute`) to support another Arrow-capable backend. `ArrowResult` takes ownership of a supplied `ArrowArrayStream` and clears the source. Stream, schema and batch have independent release callbacks and move-only RAII ownership. Batches remain valid after advancing/closing the stream. Connections must outlive result production. Neither OrchidDB nor its adapters commit or close your connection. Stream callbacks are serialized by the caller; no automatic parallel execution/federation. Postgres SQL rendering is supported, but this repository only integration-tests DuckDB.
+Implement `ExecutionEngine` (`id`, `dialect`, `execute`) to support another Arrow-capable backend. `ArrowResult` takes ownership of a supplied `ArrowArrayStream` and clears the source. Stream, schema and batch have independent release callbacks and move-only RAII ownership. Batches remain valid after advancing/closing the stream. Connections must outlive result production. Neither OrchidDB nor its adapters commit or close your connection. Stream callbacks are serialized by the caller; islands execute sequentially through `query_federated`. Postgres SQL rendering is supported, but this repository only integration-tests DuckDB.
 
 ## Run against the published binary
 
