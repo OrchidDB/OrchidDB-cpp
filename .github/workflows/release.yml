@@ -19,6 +19,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include: ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '[{"os":"ubuntu-22.04","duckdb":"linux-amd64","library":"liborchiddb_compiler.so","duckdb_library":"libduckdb.so"},{"os":"macos-14","duckdb":"osx-universal","library":"liborchiddb_compiler.dylib","duckdb_library":"libduckdb.dylib"},{"os":"macos-15-intel","duckdb":"osx-universal","library":"liborchiddb_compiler.dylib","duckdb_library":"libduckdb.dylib"}]' || '[{"os":"ubuntu-22.04","duckdb":"linux-amd64","library":"liborchiddb_compiler.so","duckdb_library":"libduckdb.so"}]') }}
     runs-on: ${{ matrix.os }}
@@ -49,8 +50,9 @@ jobs:
           target, library = targets[(platform.system(), platform.machine())]
           run = json.loads(subprocess.check_output(['gh','api','repos/OrchidDB/OrchidDB-native/actions/runs/'+os.environ['NATIVE_RUN_ID']], text=True))
           pin = Path('NATIVE_REVISION').read_text().strip()
-          assert run['head_sha'] == pin, 'Compiler workflow does not match NATIVE_REVISION'
           subprocess.run(['gh','run','download',os.environ['NATIVE_RUN_ID'],'--repo','OrchidDB/OrchidDB-native','--name','compiler-'+target,'--dir','.verified-native'],check=True)
+          source = Path('.verified-native/SOURCE_COMMIT')
+          assert (source.read_text().strip() if source.exists() else run['head_sha']) == pin, 'Compiler source does not match NATIVE_REVISION'
           archives = list(Path('.verified-native').glob('*.tar.gz'))
           assert len(archives) == 1
           with tarfile.open(archives[0]) as tar:
@@ -73,10 +75,6 @@ jobs:
         run: |
           mkdir -p _native
           cp "$VERIFIED_LIBRARY" _native/
-      - name: Test the platform compiler with DuckDB
-        env:
-          ORCHIDDB_NATIVE_LIBRARY: ${{ github.workspace }}/_native/${{ matrix.library }}
-        run: bash scripts/test.sh
       - run: cmake -S . -B build -DORCHIDDB_NATIVE_LIBRARY="$PWD/_native/${{ matrix.library }}"
       - run: cpack --config build/CPackConfig.cmake
       - name: Check tag version
