@@ -21,6 +21,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: {workspaces: .native-build/orchiddb-native}
       - run: ./scripts/build-native.sh
+      - name: Test the platform compiler with DuckDB
+        env:
+          ORCHIDDB_NATIVE_LIBRARY: ${{ github.workspace }}/_native/${{ matrix.library }}
+        run: bash scripts/test.sh
       - run: cmake -S . -B build -DORCHIDDB_NATIVE_LIBRARY="$PWD/_native/${{ matrix.library }}"
       - run: cpack --config build/CPackConfig.cmake
       - name: Check tag version
@@ -38,5 +42,5 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: {pattern: 'package-*', path: packages, merge-multiple: true}
-      - run: gh release create "$GITHUB_REF_NAME" packages/*.tar.gz --repo "$GITHUB_REPOSITORY" --generate-notes
+      - run: gh release create "$GITHUB_REF_NAME" packages/*.tar.gz --repo "$GITHUB_REPOSITORY" --draft --generate-notes
         env: {GH_TOKEN: '${{ github.token }}'}
